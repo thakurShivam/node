@@ -586,6 +586,7 @@ uint32_t ComputeFlagListHash() {
     // The following flags are implied by --predictable (some negated).
     if (flag.PointsTo(&v8_flags.concurrent_sparkplug) ||
         flag.PointsTo(&v8_flags.concurrent_recompilation) ||
+        flag.PointsTo(&v8_flags.lazy_feedback_allocation) ||
 #ifdef V8_ENABLE_MAGLEV
         flag.PointsTo(&v8_flags.maglev_deopt_data_on_background) ||
         flag.PointsTo(&v8_flags.maglev_build_code_on_background) ||
@@ -614,14 +615,20 @@ uint32_t ComputeFlagListHash() {
   }
 
 #ifdef DEBUG
-  for (const char* name : flags_implied_by_predictable) {
-    if (flags_ignored_because_of_predictable.find(name) ==
-        flags_ignored_because_of_predictable.end()) {
-      PrintF(
-          "%s should be added to the list of "
-          "flags_ignored_because_of_predictable\n",
-          name);
-      UNREACHABLE();
+  // Disable the check for fuzzing. This check is only here
+  // to ensure that we can generate reproducible code cache
+  // for production builds, we don't care as much about the
+  // reproducibility in the case of fuzzing.
+  if (!v8_flags.fuzzing) {
+    for (const char* name : flags_implied_by_predictable) {
+      if (flags_ignored_because_of_predictable.find(name) ==
+          flags_ignored_because_of_predictable.end()) {
+        PrintF(
+            "%s should be added to the list of "
+            "flags_ignored_because_of_predictable\n",
+            name);
+        UNREACHABLE();
+      }
     }
   }
 #endif
@@ -1049,6 +1056,49 @@ class ImplicationProcessor {
 };
 
 }  // namespace
+
+#define CONTRADICTION(flag1, flag2)                         \
+  (v8_flags.flag1 && v8_flags.flag2)                        \
+      ? std::make_tuple(FindFlagByPointer(&v8_flags.flag1), \
+                        FindFlagByPointer(&v8_flags.flag2)) \
+      : std::make_tuple(nullptr, nullptr)
+
+// static
+void FlagList::ResolveContradictionsWhenFuzzing() {
+  if (!i::v8_flags.fuzzing) return;
+
+  // List flags that lead to known contradictory cycles when both are passed
+  // on the command line. One of them will be reset with precedence left to
+  // right.
+  std::tuple<Flag*, Flag*> contradictions[] = {
+      CONTRADICTION(jitless, maglev_future),
+      CONTRADICTION(jitless, stress_maglev),
+      CONTRADICTION(jitless, stress_concurrent_inlining),
+      CONTRADICTION(jitless, stress_concurrent_inlining_attach_code),
+      CONTRADICTION(stress_concurrent_inlining, assert_types),
+      CONTRADICTION(stress_concurrent_inlining_attach_code, assert_types),
+  };
+  for (auto [flag1, flag2] : contradictions) {
+    if (!flag1 || !flag2) continue;
+    // Check values again, since a flag might have already been reset by
+    // another contradiction.
+    if (!flag1->bool_variable() || !flag2->bool_variable()) continue;
+
+    Flag* flag = flag1;
+    if (flag->IsDefault()) {
+      flag = flag2;
+    }
+    if (flag->IsDefault()) {
+      FATAL("Multiple flags with contradictory default values");
+    }
+
+    std::cerr << "Warning: resetting flag --" << flag->name()
+              << " due to conflicting flags" << std::endl;
+    flag->Reset();
+  }
+}
+
+#undef CONTRADICTION
 
 // static
 void FlagList::EnforceFlagImplications() {

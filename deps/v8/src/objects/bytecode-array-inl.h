@@ -18,10 +18,15 @@ namespace v8 {
 namespace internal {
 
 CAST_ACCESSOR(BytecodeArray)
-OBJECT_CONSTRUCTORS_IMPL(BytecodeArray, FixedArrayBase)
+OBJECT_CONSTRUCTORS_IMPL(BytecodeArray, ExposedTrustedObject)
 
-ACCESSORS(BytecodeArray, constant_pool, Tagged<FixedArray>, kConstantPoolOffset)
-ACCESSORS(BytecodeArray, handler_table, Tagged<ByteArray>, kHandlerTableOffset)
+SMI_ACCESSORS(BytecodeArray, length, kLengthOffset)
+RELEASE_ACQUIRE_SMI_ACCESSORS(BytecodeArray, length, kLengthOffset)
+PROTECTED_POINTER_ACCESSORS(BytecodeArray, handler_table, TrustedByteArray,
+                            kHandlerTableOffset)
+PROTECTED_POINTER_ACCESSORS(BytecodeArray, constant_pool, TrustedFixedArray,
+                            kConstantPoolOffset)
+ACCESSORS(BytecodeArray, wrapper, Tagged<BytecodeWrapper>, kWrapperOffset)
 RELEASE_ACQUIRE_ACCESSORS(BytecodeArray, source_position_table,
                           Tagged<HeapObject>, kSourcePositionTableOffset)
 
@@ -121,18 +126,16 @@ DEF_GETTER(BytecodeArray, SourcePositionTable, Tagged<ByteArray>) {
 }
 
 DEF_GETTER(BytecodeArray, raw_constant_pool, Tagged<Object>) {
-  Tagged<Object> value =
-      TaggedField<Object>::load(cage_base, *this, kConstantPoolOffset);
+  Tagged<Object> value = RawProtectedPointerField(kConstantPoolOffset).load();
   // This field might be 0 during deserialization.
-  DCHECK(value == Smi::zero() || IsFixedArray(value));
+  DCHECK(value == Smi::zero() || IsTrustedFixedArray(value));
   return value;
 }
 
 DEF_GETTER(BytecodeArray, raw_handler_table, Tagged<Object>) {
-  Tagged<Object> value =
-      TaggedField<Object>::load(cage_base, *this, kHandlerTableOffset);
+  Tagged<Object> value = RawProtectedPointerField(kHandlerTableOffset).load();
   // This field might be 0 during deserialization.
-  DCHECK(value == Smi::zero() || IsByteArray(value));
+  DCHECK(value == Smi::zero() || IsTrustedByteArray(value));
   return value;
 }
 
@@ -150,14 +153,14 @@ int BytecodeArray::BytecodeArraySize() const { return SizeFor(this->length()); }
 DEF_GETTER(BytecodeArray, SizeIncludingMetadata, int) {
   int size = BytecodeArraySize();
   Tagged<Object> maybe_constant_pool = raw_constant_pool(cage_base);
-  if (IsFixedArray(maybe_constant_pool)) {
-    size += FixedArray::cast(maybe_constant_pool)->Size(cage_base);
+  if (IsTrustedFixedArray(maybe_constant_pool)) {
+    size += TrustedFixedArray::cast(maybe_constant_pool)->Size(cage_base);
   } else {
     DCHECK_EQ(maybe_constant_pool, Smi::zero());
   }
   Tagged<Object> maybe_handler_table = raw_handler_table(cage_base);
-  if (IsByteArray(maybe_handler_table)) {
-    size += ByteArray::cast(maybe_handler_table)->AllocatedSize();
+  if (IsTrustedByteArray(maybe_handler_table)) {
+    size += TrustedByteArray::cast(maybe_handler_table)->AllocatedSize();
   } else {
     DCHECK_EQ(maybe_handler_table, Smi::zero());
   }
@@ -166,6 +169,17 @@ DEF_GETTER(BytecodeArray, SizeIncludingMetadata, int) {
     size += ByteArray::cast(maybe_table)->AllocatedSize();
   }
   return size;
+}
+
+CAST_ACCESSOR(BytecodeWrapper)
+OBJECT_CONSTRUCTORS_IMPL(BytecodeWrapper, Struct)
+
+TRUSTED_POINTER_ACCESSORS(BytecodeWrapper, bytecode, BytecodeArray,
+                          kBytecodeOffset, kBytecodeArrayIndirectPointerTag)
+
+void BytecodeWrapper::clear_padding() {
+  WriteField<int32_t>(kPadding1Offset, 0);
+  WriteField<int32_t>(kPadding2Offset, 0);
 }
 
 }  // namespace internal

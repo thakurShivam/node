@@ -135,15 +135,16 @@ class V8_EXPORT_PRIVATE CppHeap final
       std::unique_ptr<CustomSpaceStatisticsReceiver>);
 
   void FinishSweepingIfRunning();
+  void FinishAtomicSweepingIfRunning();
   void FinishSweepingIfOutOfWork();
 
-  void InitializeTracing(
+  void InitializeMarking(
       CollectionType,
       GarbageCollectionFlags = GarbageCollectionFlagValues::kNoFlags);
-  void StartTracing();
+  void StartMarking();
   bool AdvanceTracing(v8::base::TimeDelta max_duration);
   bool IsTracingDone() const;
-  void TraceEpilogue();
+  void FinishMarkingAndStartSweeping();
   void EnterFinalPause(cppgc::EmbedderStackState stack_state);
   bool FinishConcurrentMarkingIfNeeded();
   void WriteBarrier(Tagged<JSObject>);
@@ -210,6 +211,7 @@ class V8_EXPORT_PRIVATE CppHeap final
 
   bool TracingInitialized() const { return collection_type_.has_value(); }
 
+  bool IsGCForbidden() const override;
   bool IsGCAllowed() const override;
   bool IsDetachedGCAllowed() const;
 

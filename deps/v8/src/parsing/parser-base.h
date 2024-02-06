@@ -931,9 +931,21 @@ class ParserBase {
            scanner()->NextSymbol(ast_value_factory()) == name;
   }
 
+  bool PeekContextualKeyword(Token::Value token) {
+    return peek() == token && !scanner()->next_literal_contains_escapes();
+  }
+
   bool CheckContextualKeyword(const AstRawString* name) {
     if (PeekContextualKeyword(name)) {
       Consume(Token::IDENTIFIER);
+      return true;
+    }
+    return false;
+  }
+
+  bool CheckContextualKeyword(Token::Value token) {
+    if (PeekContextualKeyword(token)) {
+      Consume(token);
       return true;
     }
     return false;
@@ -956,11 +968,23 @@ class ParserBase {
     }
   }
 
+  void ExpectContextualKeyword(Token::Value token) {
+    // Token Should be in range of Token::IDENTIFIER + 1 to Token::ASYNC
+    DCHECK(base::IsInRange(token, Token::GET, Token::ASYNC));
+    Token::Value next = Next();
+    if (V8_UNLIKELY(next != token)) {
+      ReportUnexpectedToken(next);
+    }
+    if (V8_UNLIKELY(scanner()->literal_contains_escapes())) {
+      impl()->ReportUnexpectedToken(Token::ESCAPED_KEYWORD);
+    }
+  }
+
   bool CheckInOrOf(ForEachStatement::VisitMode* visit_mode) {
     if (Check(Token::IN)) {
       *visit_mode = ForEachStatement::ENUMERATE;
       return true;
-    } else if (CheckContextualKeyword(ast_value_factory()->of_string())) {
+    } else if (CheckContextualKeyword(Token::OF)) {
       *visit_mode = ForEachStatement::ITERATE;
       return true;
     }
@@ -968,8 +992,7 @@ class ParserBase {
   }
 
   bool PeekInOrOf() {
-    return peek() == Token::IN ||
-           PeekContextualKeyword(ast_value_factory()->of_string());
+    return peek() == Token::IN || PeekContextualKeyword(Token::OF);
   }
 
   // Checks whether an octal literal was last seen between beg_pos and end_pos.
@@ -1060,6 +1083,32 @@ class ParserBase {
   bool is_await_as_identifier_disallowed() {
     return flags().is_module() ||
            IsAwaitAsIdentifierDisallowed(function_state_->kind());
+  }
+  bool is_using_allowed() const {
+    // UsingDeclaration is a Syntax Error if the goal symbol is Script and
+    // UsingDeclaration is not contained, either directly or indirectly, within
+    // a Block, CaseBlock, ForStatement, ForInOfStatement, FunctionBody,
+    // GeneratorBody, AsyncGeneratorBody, AsyncFunctionBody,
+    // ClassStaticBlockBody, or ClassBody.
+    // Unless the current scope's ScopeType is ScriptScope, the current position
+    // is directly or indirectly within one of the productions listed above
+    // since they open a new scope.
+    return scope()->scope_type() != SCRIPT_SCOPE;
+  }
+  bool IfNextUsingKeyword() {
+    // If the token after `using` is `of` or `in`, `using` is an identifier
+    // and not a declaration token.
+    // `of`: for ( [lookahead ≠ using of] ForDeclaration[?Yield, ?Await, +Using]
+    //       of AssignmentExpression[+In, ?Yield, ?Await] )
+    // `in`: for ( ForDeclaration[?Yield, ?Await, ~Using] in
+    //       Expression[+In, ?Yield, ?Await] )
+    // If the token after `using` is `{` or `[`, it
+    // shows a pattern after `using` which is not applicable.
+    // `{` or `[`: using [no LineTerminator here] [lookahead ≠ await]
+    // ForBinding[?Yield, ?Await, ~Pattern]
+    return (v8_flags.js_explicit_resource_management &&
+            PeekAhead() != Token::LBRACK && PeekAhead() != Token::LBRACE &&
+            PeekAhead() != Token::OF && PeekAhead() != Token::IN);
   }
   const PendingCompilationErrorHandler* pending_error_handler() const {
     return pending_error_handler_;
@@ -1158,6 +1207,7 @@ class ParserBase {
   // a pattern.
   V8_INLINE ExpressionT ParseExpression();
   V8_INLINE ExpressionT ParseAssignmentExpression();
+  V8_INLINE ExpressionT ParseConditionalChainAssignmentExpression();
 
   // These methods do not wrap the parsing of the expression inside a new
   // expression_scope; they use the outer expression_scope instead. They should
@@ -1168,6 +1218,9 @@ class ParserBase {
   // specification).
   ExpressionT ParseExpressionCoverGrammar();
   ExpressionT ParseAssignmentExpressionCoverGrammar();
+  ExpressionT ParseAssignmentExpressionCoverGrammarContinuation(
+      int lhs_beg_pos, ExpressionT expression);
+  ExpressionT ParseConditionalChainAssignmentExpressionCoverGrammar();
 
   ExpressionT ParseArrowParametersWithRest(ExpressionListT* list,
                                            AccumulationScope* scope,
@@ -1199,6 +1252,8 @@ class ParserBase {
 
   ExpressionT ParseYieldExpression();
   V8_INLINE ExpressionT ParseConditionalExpression();
+  ExpressionT ParseConditionalChainExpression(ExpressionT condition,
+                                              int condition_pos);
   ExpressionT ParseConditionalContinuation(ExpressionT expression, int pos);
   ExpressionT ParseLogicalExpression();
   ExpressionT ParseCoalesceExpression(ExpressionT expression);
@@ -2080,6 +2135,15 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseExpression() {
 
 template <typename Impl>
 typename ParserBase<Impl>::ExpressionT
+ParserBase<Impl>::ParseConditionalChainAssignmentExpression() {
+  ExpressionParsingScope expression_scope(impl());
+  ExpressionT result = ParseConditionalChainAssignmentExpressionCoverGrammar();
+  expression_scope.ValidateExpression();
+  return result;
+}
+
+template <typename Impl>
+typename ParserBase<Impl>::ExpressionT
 ParserBase<Impl>::ParseAssignmentExpression() {
   ExpressionParsingScope expression_scope(impl());
   ExpressionT result = ParseAssignmentExpressionCoverGrammar();
@@ -2915,6 +2979,34 @@ void ParserBase<Impl>::ParseArguments(
   }
 }
 
+template <typename Impl>
+typename ParserBase<Impl>::ExpressionT
+ParserBase<Impl>::ParseConditionalChainAssignmentExpressionCoverGrammar() {
+  // AssignmentExpression ::
+  //   ArrowFunction
+  //   YieldExpression
+  //   LeftHandSideExpression AssignmentOperator AssignmentExpression
+  int lhs_beg_pos = peek_position();
+
+  if (peek() == Token::YIELD && is_generator()) {
+    return ParseYieldExpression();
+  }
+
+  FuncNameInferrerState fni_state(&fni_);
+
+  DCHECK_IMPLIES(!has_error(), next_arrow_function_info_.HasInitialState());
+
+  ExpressionT expression = ParseLogicalExpression();
+
+  Token::Value op = peek();
+
+  if (!Token::IsArrowOrAssignmentOp(op) || peek() == Token::CONDITIONAL)
+    return expression;
+
+  return ParseAssignmentExpressionCoverGrammarContinuation(lhs_beg_pos,
+                                                           expression);
+}
+
 // Precedence = 2
 template <typename Impl>
 typename ParserBase<Impl>::ExpressionT
@@ -2939,6 +3031,22 @@ ParserBase<Impl>::ParseAssignmentExpressionCoverGrammar() {
   Token::Value op = peek();
 
   if (!Token::IsArrowOrAssignmentOp(op)) return expression;
+
+  return ParseAssignmentExpressionCoverGrammarContinuation(lhs_beg_pos,
+                                                           expression);
+}
+
+// Precedence = 2
+template <typename Impl>
+typename ParserBase<Impl>::ExpressionT
+ParserBase<Impl>::ParseAssignmentExpressionCoverGrammarContinuation(
+    int lhs_beg_pos, ExpressionT expression) {
+  // AssignmentExpression ::
+  //   ConditionalExpression
+  //   ArrowFunction
+  //   YieldExpression
+  //   LeftHandSideExpression AssignmentOperator AssignmentExpression
+  Token::Value op = peek();
 
   // Arrow functions.
   if (V8_UNLIKELY(op == Token::ARROW)) {
@@ -3121,7 +3229,7 @@ ParserBase<Impl>::ParseConditionalExpression() {
   int pos = peek_position();
   ExpressionT expression = ParseLogicalExpression();
   return peek() == Token::CONDITIONAL
-             ? ParseConditionalContinuation(expression, pos)
+             ? ParseConditionalChainExpression(expression, pos)
              : expression;
 }
 
@@ -3180,6 +3288,87 @@ ParserBase<Impl>::ParseCoalesceExpression(ExpressionT expression) {
     }
   }
   return expression;
+}
+
+template <typename Impl>
+typename ParserBase<Impl>::ExpressionT
+ParserBase<Impl>::ParseConditionalChainExpression(ExpressionT condition,
+                                                  int condition_pos) {
+  // ConditionalChainExpression ::
+  // ConditionalExpression_1 ? AssignmentExpression_1 :
+  // ConditionalExpression_2 ? AssignmentExpression_2 :
+  // ConditionalExpression_3 ? AssignmentExpression_3 :
+  // ...
+  // ConditionalExpression_n ? AssignmentExpression_n
+
+  ExpressionT expr = impl()->NullExpression();
+  ExpressionT else_expression = impl()->NullExpression();
+  bool else_found = false;
+  ZoneVector<int> else_ranges_beg_pos(impl()->zone());
+  do {
+    SourceRange then_range;
+    ExpressionT then_expression;
+    {
+      SourceRangeScope range_scope(scanner(), &then_range);
+      Consume(Token::CONDITIONAL);
+      // In parsing the first assignment expression in conditional
+      // expressions we always accept the 'in' keyword; see ECMA-262,
+      // section 11.12, page 58.
+      AcceptINScope scope(this, true);
+      then_expression = ParseAssignmentExpression();
+    }
+
+    else_ranges_beg_pos.emplace_back(scanner()->peek_location().beg_pos);
+    int condition_or_else_pos = peek_position();
+    SourceRange condition_or_else_range = SourceRange();
+    ExpressionT condition_or_else_expression;
+    {
+      SourceRangeScope condition_or_else_range_scope(scanner(),
+                                                     &condition_or_else_range);
+      Expect(Token::COLON);
+      condition_or_else_expression =
+          ParseConditionalChainAssignmentExpression();
+    }
+
+    else_found = (peek() != Token::CONDITIONAL);
+
+    if (else_found) {
+      else_expression = condition_or_else_expression;
+
+      if (impl()->IsNull(expr)) {
+        // When we have a single conditional expression, we don't create a
+        // conditional chain expression. Instead, we just return a conditional
+        // expression.
+        SourceRange else_range = condition_or_else_range;
+        expr = factory()->NewConditional(condition, then_expression,
+                                         else_expression, condition_pos);
+        impl()->RecordConditionalSourceRange(expr, then_range, else_range);
+        return expr;
+      }
+    }
+
+    if (impl()->IsNull(expr)) {
+      // For the first conditional expression, we create a conditional chain.
+      expr = factory()->NewConditionalChain(1, condition_pos);
+    }
+
+    impl()->CollapseConditionalChain(&expr, condition, then_expression,
+                                     else_expression, condition_pos,
+                                     then_range);
+
+    if (!else_found) {
+      condition = condition_or_else_expression;
+      condition_pos = condition_or_else_pos;
+    }
+  } while (!else_found);
+
+  int end_pos = scanner()->location().end_pos;
+  for (const auto& else_range_beg_pos : else_ranges_beg_pos) {
+    impl()->AppendConditionalChainElse(
+        &expr, SourceRange(else_range_beg_pos, end_pos));
+  }
+
+  return expr;
 }
 
 template <typename Impl>
@@ -3764,12 +3953,11 @@ ParserBase<Impl>::ParseImportExpressions() {
       // A trailing comma allowed after the specifier.
       return factory()->NewImportCallExpression(specifier, pos);
     } else {
-      ExpressionT import_assertions = ParseAssignmentExpressionCoverGrammar();
+      ExpressionT import_options = ParseAssignmentExpressionCoverGrammar();
       Check(Token::COMMA);  // A trailing comma is allowed after the import
                             // assertions.
       Expect(Token::RPAREN);
-      return factory()->NewImportCallExpression(specifier, import_assertions,
-                                                pos);
+      return factory()->NewImportCallExpression(specifier, import_options, pos);
     }
   }
 
@@ -3986,7 +4174,8 @@ void ParserBase<Impl>::ParseVariableDeclarations(
     DeclarationParsingResult* parsing_result,
     ZonePtrList<const AstRawString>* names) {
   // VariableDeclarations ::
-  //   ('var' | 'const' | 'let') (Identifier ('=' AssignmentExpression)?)+[',']
+  //   ('var' | 'const' | 'let' | 'using') (Identifier ('='
+  //   AssignmentExpression)?)+[',']
   //
   // ES6:
   // FIXME(marja, nikolaos): Add an up-to-date comment about ES6 variable
@@ -4011,6 +4200,18 @@ void ParserBase<Impl>::ParseVariableDeclarations(
       Consume(Token::LET);
       DCHECK_NE(var_context, kStatement);
       parsing_result->descriptor.mode = VariableMode::kLet;
+      break;
+    case Token::USING:
+      // using [no LineTerminator here] [lookahead ≠ await] BindingList[?In,
+      // ?Yield, ?Await, ~Pattern] ;
+      Consume(Token::USING);
+      DCHECK_NE(var_context, kStatement);
+      DCHECK(v8_flags.js_explicit_resource_management);
+      DCHECK(is_using_allowed());
+      DCHECK(peek() != Token::AWAIT);
+      DCHECK(!scanner()->HasLineTerminatorBeforeNext());
+      DCHECK(PeekAhead() != Token::LBRACK && PeekAhead() != Token::LBRACE);
+      parsing_result->descriptor.mode = VariableMode::kUsing;
       break;
     default:
       UNREACHABLE();  // by current callers
@@ -4055,7 +4256,7 @@ void ParserBase<Impl>::ParseVariableDeclarations(
         impl()->DeclareIdentifier(name, decl_pos);
         pattern = impl()->NullExpression();
       }
-    } else {
+    } else if (parsing_result->descriptor.mode != VariableMode::kUsing) {
       name = impl()->NullIdentifier();
       pattern = ParseBindingPattern();
       DCHECK(!impl()->IsIdentifier(pattern));
@@ -4397,11 +4598,11 @@ void ParserBase<Impl>::ParseFunctionBody(
       } else {
         ParseStatementList(&inner_body, closing_token);
       }
-
       if (IsDerivedConstructor(kind)) {
+        // Derived constructors are implemented by returning `this` when the
+        // original return value is undefined, so always use `this`.
         ExpressionParsingScope expression_scope(impl());
-        inner_body.Add(factory()->NewReturnStatement(impl()->ThisExpression(),
-                                                     kNoSourcePosition));
+        UseThis();
         expression_scope.ValidateExpression();
       }
       Expect(closing_token);
@@ -4517,6 +4718,8 @@ bool ParserBase<Impl>::IsNextLetKeyword() {
     case Token::AWAIT:
     case Token::GET:
     case Token::SET:
+    case Token::OF:
+    case Token::USING:
     case Token::ASYNC:
       return true;
     case Token::FUTURE_STRICT_RESERVED_WORD:
@@ -5237,8 +5440,9 @@ ParserBase<Impl>::ParseStatementListItem() {
   //   FunctionDeclaration[?Yield, ?Default]
   //   GeneratorDeclaration[?Yield, ?Default]
   //
-  // LexicalDeclaration[In, Yield] :
-  //   LetOrConst BindingList[?In, ?Yield] ;
+  // LexicalDeclaration[In, Yield, Await] :
+  //   LetOrConst BindingList[?In, ?Yield, ?Await, +Pattern] ;
+  //   UsingDeclaration[?In, ?Yield, ?Await, ~Pattern];
 
   switch (peek()) {
     case Token::FUNCTION:
@@ -5251,6 +5455,15 @@ ParserBase<Impl>::ParseStatementListItem() {
       return ParseVariableStatement(kStatementListItem, nullptr);
     case Token::LET:
       if (IsNextLetKeyword()) {
+        return ParseVariableStatement(kStatementListItem, nullptr);
+      }
+      break;
+    case Token::USING:
+      if (!v8_flags.js_explicit_resource_management) break;
+      if (!is_using_allowed()) break;
+      if (!(scanner()->HasLineTerminatorAfterNext()) &&
+          PeekAhead() != Token::AWAIT && PeekAhead() != Token::LBRACK &&
+          PeekAhead() != Token::LBRACE) {
         return ParseVariableStatement(kStatementListItem, nullptr);
       }
       break;
@@ -5710,18 +5923,12 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseReturnStatement() {
 
   Token::Value tok = peek();
   ExpressionT return_value = impl()->NullExpression();
-  if (scanner()->HasLineTerminatorBeforeNext() || Token::IsAutoSemicolon(tok)) {
-    if (IsDerivedConstructor(function_state_->kind())) {
-      ExpressionParsingScope expression_scope(impl());
-      return_value = impl()->ThisExpression();
-      expression_scope.ValidateExpression();
-    }
-  } else {
+  if (!scanner()->HasLineTerminatorBeforeNext() &&
+      !Token::IsAutoSemicolon(tok)) {
     return_value = ParseExpression();
   }
   ExpectSemicolon();
 
-  return_value = impl()->RewriteReturn(return_value, loc.beg_pos);
   int continuation_pos = end_position();
   StatementT stmt =
       BuildReturnStatement(return_value, loc.beg_pos, continuation_pos);
@@ -6061,7 +6268,21 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseForStatement(
   Expect(Token::LPAREN);
 
   bool starts_with_let = peek() == Token::LET;
-  if (peek() == Token::CONST || (starts_with_let && IsNextLetKeyword())) {
+
+  // If the token after `using` is `of` or `in`, `using` is an identifier
+  // and not a declaration token.
+  // `of`: for ( [lookahead ≠ using of] ForDeclaration[?Yield, ?Await, +Using]
+  //       of AssignmentExpression[+In, ?Yield, ?Await] )
+  // `in`: for ( ForDeclaration[?Yield, ?Await, ~Using] in
+  //       Expression[+In, ?Yield, ?Await] )
+  // If the token after `using` is `{` or `[`, it
+  // shows a pattern after `using` which is not applicable.
+  // `{` or `[`: using [no LineTerminator here] [lookahead ≠ await]
+  // ForBinding[?Yield, ?Await, ~Pattern]
+  bool starts_with_using_keyword =
+      (peek() == Token::USING) && IfNextUsingKeyword();
+  if (peek() == Token::CONST || (starts_with_let && IsNextLetKeyword()) ||
+      starts_with_using_keyword) {
     // The initializer contains lexical declarations,
     // so create an in-between scope.
     BlockState for_state(zone(), &scope_);
@@ -6086,6 +6307,11 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseForStatement(
 
     if (CheckInOrOf(&for_info.mode)) {
       scope()->set_is_hidden();
+      if (starts_with_using_keyword &&
+          for_info.mode == ForEachStatement::ENUMERATE) {
+        impl()->ReportMessageAt(scanner()->location(),
+                                MessageTemplate::kInvalidUsingInForInLoop);
+      }
       return ParseForEachStatementWithDeclarations(
           stmt_pos, &for_info, labels, own_labels, inner_block_scope);
     }
@@ -6475,7 +6701,7 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseForAwaitStatement(
     }
   }
 
-  ExpectContextualKeyword(ast_value_factory()->of_string());
+  ExpectContextualKeyword(Token::OF);
 
   const bool kAllowIn = true;
   ExpressionT iterable = impl()->NullExpression();

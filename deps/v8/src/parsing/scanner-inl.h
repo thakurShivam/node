@@ -57,6 +57,8 @@ namespace internal {
   KEYWORD_GROUP('n')                                        \
   KEYWORD("new", Token::NEW)                                \
   KEYWORD("null", Token::NULL_LITERAL)                      \
+  KEYWORD_GROUP('o')                                        \
+  KEYWORD("of", Token::OF)                                  \
   KEYWORD_GROUP('p')                                        \
   KEYWORD("package", Token::FUTURE_STRICT_RESERVED_WORD)    \
   KEYWORD("private", Token::FUTURE_STRICT_RESERVED_WORD)    \
@@ -75,6 +77,8 @@ namespace internal {
   KEYWORD("true", Token::TRUE_LITERAL)                      \
   KEYWORD("try", Token::TRY)                                \
   KEYWORD("typeof", Token::TYPEOF)                          \
+  KEYWORD_GROUP('u')                                        \
+  KEYWORD("using", Token::USING)                            \
   KEYWORD_GROUP('v')                                        \
   KEYWORD("var", Token::VAR)                                \
   KEYWORD("void", Token::VOID)                              \
@@ -459,7 +463,7 @@ V8_INLINE Token::Value Scanner::ScanSingleToken() {
             if (c == '#' || c == '@') {
               Advance();
               Advance();
-              token = SkipMagicComment();
+              token = SkipMagicComment(c);
               continue;
             }
             token = SkipSingleLineComment();

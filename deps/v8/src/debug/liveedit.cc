@@ -534,7 +534,6 @@ bool ParseScript(Isolate* isolate, Handle<Script> script, ParseInfo* parse_info,
     }
   }
   if (!success) {
-    isolate->OptionalRescheduleException(false);
     DCHECK(try_catch.HasCaught());
     result->message = try_catch.Message()->Get();
     i::Handle<i::JSMessageObject> msg = Utils::OpenHandle(*try_catch.Message());
@@ -922,7 +921,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
 
     sfi->set_script(*new_script, kReleaseStore);
     sfi->set_function_literal_id(mapping.second->function_literal_id());
-    new_script->shared_function_infos()->Set(
+    new_script->shared_function_infos()->set(
         mapping.second->function_literal_id(), HeapObjectReference::Weak(*sfi));
     DCHECK_EQ(sfi->function_literal_id(),
               mapping.second->function_literal_id());
@@ -939,7 +938,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
     for (auto& js_function : data->js_functions) {
       js_function->set_raw_feedback_cell(
           *isolate->factory()->many_closures_cell());
-      if (!js_function->is_compiled()) continue;
+      if (!js_function->is_compiled(isolate)) continue;
       IsCompiledScope is_compiled_scope(
           js_function->shared()->is_compiled_scope(isolate));
       JSFunction::EnsureFeedbackVector(isolate, js_function,
@@ -947,7 +946,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
     }
 
     if (!sfi->HasBytecodeArray()) continue;
-    Tagged<FixedArray> constants =
+    Tagged<TrustedFixedArray> constants =
         sfi->GetBytecodeArray(isolate)->constant_pool();
     for (int i = 0; i < constants->length(); ++i) {
       if (!IsSharedFunctionInfo(constants->get(i))) continue;
@@ -988,7 +987,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
 
       js_function->set_raw_feedback_cell(
           *isolate->factory()->many_closures_cell());
-      if (!js_function->is_compiled()) continue;
+      if (!js_function->is_compiled(isolate)) continue;
       IsCompiledScope is_compiled_scope(
           js_function->shared()->is_compiled_scope(isolate));
       JSFunction::EnsureFeedbackVector(isolate, js_function,
@@ -999,7 +998,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
   for (Tagged<SharedFunctionInfo> sfi = it.Next(); !sfi.is_null();
        sfi = it.Next()) {
     if (!sfi->HasBytecodeArray()) continue;
-    Tagged<FixedArray> constants =
+    Tagged<TrustedFixedArray> constants =
         sfi->GetBytecodeArray(isolate)->constant_pool();
     for (int i = 0; i < constants->length(); ++i) {
       if (!IsSharedFunctionInfo(constants->get(i))) continue;
@@ -1015,7 +1014,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
       // already been updated in in the unchanged pass.
       Tagged<SharedFunctionInfo> old_unchanged_inner_sfi =
           SharedFunctionInfo::cast(new_script->shared_function_infos()
-                                       ->Get(unchanged_it->second)
+                                       ->get(unchanged_it->second)
                                        .GetHeapObject());
       if (old_unchanged_inner_sfi == inner_sfi) continue;
       DCHECK_NE(old_unchanged_inner_sfi, inner_sfi);
@@ -1050,7 +1049,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
       // Check that all the functions in this function's constant pool are also
       // on the new script, and that their id matches their index in the new
       // scripts function list.
-      Tagged<FixedArray> constants =
+      Tagged<TrustedFixedArray> constants =
           sfi->GetBytecodeArray(isolate)->constant_pool();
       for (int i = 0; i < constants->length(); ++i) {
         if (!IsSharedFunctionInfo(constants->get(i))) continue;
@@ -1058,7 +1057,7 @@ void LiveEdit::PatchScript(Isolate* isolate, Handle<Script> script,
             SharedFunctionInfo::cast(constants->get(i));
         DCHECK_EQ(inner_sfi->script(), *new_script);
         DCHECK_EQ(inner_sfi, new_script->shared_function_infos()
-                                 ->Get(inner_sfi->function_literal_id())
+                                 ->get(inner_sfi->function_literal_id())
                                  .GetHeapObject());
       }
     }
